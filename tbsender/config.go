@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	Version                 = "unio 1.4.2"
-	PREFIX_MODULE           = "tbsender"
-	ROTATE_LOG_HOURS        = 12
-	ROTATE_LOG_RETAIN_HOURS = 12
-	defaultTag              = "TANGLE9BEAT"
-	defaultTagPromote       = "TANGLE9BEAT"
-	defaultAddressPromote   = "TANGLEBEAT9PROMOTE999999999999999999999999999999999999999999999999999999999999999"
+	Version                    = "unio 1.4.2"
+	PREFIX_MODULE              = "tbsender"
+	ROTATE_LOG_HOURS           = 12
+	ROTATE_LOG_RETAIN_HOURS    = 12
+	defaultTag                 = "TANGLE9BEAT"
+	defaultTagPromote          = "TANGLE9BEAT"
+	defaultAddressPromote      = "TANGLEBEAT9PROMOTE999999999999999999999999999999999999999999999999999999999999999"
+	defaultConfirmationNanozmq = "tcp://tanglebeat.com:5550"
 )
 
 var (
@@ -41,7 +42,13 @@ type ConfigStructYAML struct {
 	Logging               loggingConfigYAML         `yaml:"logging"`
 	Sender                senderYAML                `yaml:"sender"`
 	SenderUpdatePublisher senderUpdatePublisherYAML `yaml:"senderUpdatePublisher"`
+	ConfirmationMonitor   confirmationMonitorYAML   `yaml:"confirmationMonitor"`
 	ExitProgram           exitProgramYAML           `yaml:"exitProgram"`
+}
+
+type confirmationMonitorYAML struct {
+	UsePollingOnly bool   `yaml:"usePollingOnly"` // default is listen to zmq data over nano and sometimes polling
+	NanoZmq        string `yaml:"nanoZmq"`        // defaults to tcp://tanglebeat.com:5550
 }
 
 type exitProgramCondition struct {
@@ -77,22 +84,27 @@ type senderYAML struct {
 }
 
 type senderParamsYAML struct {
-	Enabled               bool     `yaml:"enabled"`
-	IOTANode              []string `yaml:"iotaNode"`
-	IOTANodeTipsel        []string `yaml:"iotaNodeTipsel"`
-	IOTANodePoW           string   `yaml:"iotaNodePOW"`
-	TimeoutAPI            uint64   `yaml:"apiTimeout"`
-	TimeoutTipsel         uint64   `yaml:"tipselTimeout"`
-	TimeoutPoW            uint64   `yaml:"powTimeout"`
-	Seed                  string   `yaml:"seed"`
-	Index0                uint64   `yaml:"index0"`
-	TxTag                 string   `yaml:"txTag"`
-	TxTagPromote          string   `yaml:"txTagPromote"`
-	AddressPromote        string   `yaml:"addressPromote"`
-	ForceReattachAfterMin uint64   `yaml:"forceReattachAfterMin"`
-	PromoteChain          bool     `yaml:"promoteChain"`
-	PromoteEverySec       uint64   `yaml:"promoteEverySec"`
-	PromoteDisable        bool     `yaml:"promoteDisable"`
+	Enabled        bool     `yaml:"enabled"`
+	IOTANode       []string `yaml:"iotaNode"`
+	IOTANodeTipsel []string `yaml:"iotaNodeTipsel"`
+
+	IOTANodePoW      string `yaml:"iotaNodePOW"`
+	UsePOWService    bool   `yaml:"usePOWService"`
+	EndpointPOW      string `yaml:"endpointPOW"`
+	ApiKeyPOWService string `yaml:"apiKeyPOWService"`
+
+	TimeoutAPI            uint64 `yaml:"apiTimeout"`
+	TimeoutTipsel         uint64 `yaml:"tipselTimeout"`
+	TimeoutPoW            uint64 `yaml:"powTimeout"`
+	Seed                  string `yaml:"seed"`
+	Index0                uint64 `yaml:"index0"`
+	TxTag                 string `yaml:"txTag"`
+	TxTagPromote          string `yaml:"txTagPromote"`
+	AddressPromote        string `yaml:"addressPromote"`
+	ForceReattachAfterMin uint64 `yaml:"forceReattachAfterMin"`
+	PromoteChain          bool   `yaml:"promoteChain"`
+	PromoteEverySec       uint64 `yaml:"promoteEverySec"`
+	PromoteDisable        bool   `yaml:"promoteDisable"`
 }
 
 type senderUpdatePublisherYAML struct {
@@ -165,7 +177,15 @@ func mustReadMasterConfig(configFilename string) {
 			log.Infof("     IOTANodeTipsel: %v", uri)
 		}
 	}
-	log.Infof("     IOTANodePoW: %v, timeout: %v ", Config.Sender.Globals.IOTANodePoW, Config.Sender.Globals.TimeoutPoW)
+
+	if Config.Sender.Globals.UsePOWService {
+		log.Infof("Will be using PoW service from powsrv.io:")
+		log.Infof("     endpointPOW: %s", Config.Sender.Globals.EndpointPOW)
+		log.Infof("     apiKeyPOWService: %d chars long", len(Config.Sender.Globals.ApiKeyPOWService))
+	} else {
+		log.Infof("POW will be performed by the node:")
+		log.Infof("     IOTANodePoW: %v, timeout: %v ", Config.Sender.Globals.IOTANodePoW, Config.Sender.Globals.TimeoutPoW)
+	}
 
 	if Config.ExitProgram.Enabled {
 		log.Infof("Program exit conditions are ENABLED")
@@ -179,7 +199,14 @@ func mustReadMasterConfig(configFilename string) {
 		}
 	} else {
 		log.Infof("Program exit conditions are DISABLED")
-
+	}
+	if !Config.ConfirmationMonitor.UsePollingOnly {
+		if Config.ConfirmationMonitor.NanoZmq == "" {
+			Config.ConfirmationMonitor.NanoZmq = defaultConfirmationNanozmq
+		}
+		log.Infof("Will be using Nanozmq stream to monitor confirmations: '%s'", Config.ConfirmationMonitor.NanoZmq)
+	} else {
+		log.Infof("Will be using polling only to monitor confirmations")
 	}
 }
 
@@ -317,6 +344,10 @@ func getSeqParams(name string) (*senderParamsYAML, error) {
 			ret.IOTANodePoW = ret.IOTANode[0] // by default using first of nodes
 		}
 	}
+	ret.UsePOWService = Config.Sender.Globals.UsePOWService
+	ret.EndpointPOW = Config.Sender.Globals.EndpointPOW
+	ret.ApiKeyPOWService = Config.Sender.Globals.ApiKeyPOWService
+
 	if len(ret.TxTag) == 0 {
 		ret.TxTag = Config.Sender.Globals.TxTag
 	}

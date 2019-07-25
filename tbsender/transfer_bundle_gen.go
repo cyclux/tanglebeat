@@ -74,7 +74,8 @@ func initTransferBundleGenerator(name string, params *senderParamsYAML, logger *
 		return nil, err
 	}
 
-	ret.iotaMultiAPIaTT, err = multiapi.New([]string{params.IOTANodePoW}, params.TimeoutPoW)
+	// APi for PoW (multiapi with one endpoint)
+	ret.iotaMultiAPIaTT, err = createPoWAPI(params)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +122,8 @@ func (gen *transferBundleGenerator) CheckBalance(addr Hash) (bool, uint64, error
 	return spent, b.Balances[0], nil
 }
 
+const sleepAfterErrorSec = 15
+
 // main generating loop
 func (gen *transferBundleGenerator) runGenerator() {
 	var addr Hash
@@ -148,7 +151,7 @@ func (gen *transferBundleGenerator) runGenerator() {
 		spent, balance, err = gen.CheckBalance(addr)
 		if err != nil {
 			gen.log.Errorf("%v[%v]: CheckBalance returned '%v'", gen.name, gen.index, err)
-			time.Sleep(5 * time.Second)
+			time.Sleep(sleepAfterErrorSec * time.Second)
 			errorCount += 1
 			continue
 		}
@@ -182,7 +185,7 @@ func (gen *transferBundleGenerator) runGenerator() {
 			bundleData, createNew, err = gen.findBundleToConfirm(addr)
 			if err != nil {
 				gen.log.Errorf("Transfer Bundles '%v': findBundleToConfirm returned: %v", gen.name, err)
-				time.Sleep(5 * time.Second)
+				time.Sleep(sleepAfterErrorSec * time.Second)
 				errorCount += 1
 				continue
 			}
@@ -199,7 +202,7 @@ func (gen *transferBundleGenerator) runGenerator() {
 				bundleData, err = gen.sendToNext(addr) // will fill up Balance field
 				if err != nil {
 					gen.log.Errorf("Transfer Bundles: '%v' sendToNext returned: %v", gen.name, err)
-					time.Sleep(5 * time.Second)
+					time.Sleep(sleepAfterErrorSec * time.Second)
 					errorCount += 1
 					continue
 				}
@@ -224,7 +227,7 @@ func (gen *transferBundleGenerator) runGenerator() {
 			tail, err := utils.TailFromBundleTrytes(bundleData.BundleTrytes)
 			if err != nil {
 				gen.log.Errorf("Transfer Bundles: '%v' AsTransactionObject returned: %v", gen.name, err)
-				time.Sleep(5 * time.Second)
+				time.Sleep(sleepAfterErrorSec * time.Second)
 				continue
 			}
 			bundleHash := tail.Bundle
@@ -326,7 +329,7 @@ func (gen *transferBundleGenerator) sendBalance(fromAddr, toAddr Trytes, balance
 		KeyIndex: fromIndex,
 		Balance:  balance,
 	}}
-	ts := utils.UnixSec(time.Now()) // currected, must be seconds, not milis
+	ts := utils.UnixSec(time.Now()) // corrected, must be seconds, not miliseconds
 	prepTransferOptions := PrepareTransfersOptions{
 		Inputs:    inputs,
 		Timestamp: &ts,
@@ -337,7 +340,7 @@ func (gen *transferBundleGenerator) sendBalance(fromAddr, toAddr Trytes, balance
 	bundlePrep, err := gen.iotaMultiAPI.GetAPI().PrepareTransfers(seed, transfers, prepTransferOptions)
 
 	if AEC.CheckError("local", err) {
-		return nil, err
+		return nil, fmt.Errorf("from PrepareTransfers: '%v'", err)
 	}
 	//----- end prepare transfer
 
@@ -347,11 +350,12 @@ func (gen *transferBundleGenerator) sendBalance(fromAddr, toAddr Trytes, balance
 	gttaResp, err := gen.iotaMultiAPIgTTA.GetTransactionsToApprove(3, &apiret)
 
 	if AEC.CheckError(apiret.Endpoint, err) {
-		return nil, err
+		return nil, fmt.Errorf("from GetTransactionsToApprove: '%v'", err)
 	}
 	ret.TotalDurationTipselMs = uint64(apiret.Duration / time.Millisecond)
 
 	// do POW by calling attachToTangle
+	//fmt.Printf("gen ----------------------------------- %v\n", gen.iotaMultiAPIaTT)
 	bundleRet, err := gen.iotaMultiAPIaTT.AttachToTangle(
 		gttaResp.TrunkTransaction,
 		gttaResp.BranchTransaction,
@@ -360,7 +364,7 @@ func (gen *transferBundleGenerator) sendBalance(fromAddr, toAddr Trytes, balance
 		&apiret,
 	)
 	if AEC.CheckError(apiret.Endpoint, err) {
-		return nil, err
+		return nil, fmt.Errorf("from AttachToTangle: '%v'", err)
 	}
 	ret.TotalDurationPoWMs = uint64(apiret.Duration / time.Millisecond)
 
@@ -368,7 +372,7 @@ func (gen *transferBundleGenerator) sendBalance(fromAddr, toAddr Trytes, balance
 	// no multi args!!!
 	_, err = gen.iotaMultiAPI.StoreAndBroadcast(bundleRet, &apiret)
 	if AEC.CheckError(apiret.Endpoint, err) {
-		return nil, err
+		return nil, fmt.Errorf("from StoreAndBroadcast: '%v'", err)
 	}
 	ret.BundleTrytes = bundleRet
 	return ret, nil
@@ -383,7 +387,7 @@ func (gen *transferBundleGenerator) sendToNext(addr Hash) (*bundle_source.FirstB
 
 	gbResp, err := gen.getBalanceAddr(Hashes{addr})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("from gen.getBalanceAddr: '%v'", err)
 	}
 	balance := gbResp.Balances[0]
 	if balance == 0 {
@@ -394,7 +398,7 @@ func (gen *transferBundleGenerator) sendToNext(addr Hash) (*bundle_source.FirstB
 	}
 	ret, err := gen.sendBalance(addr, nextAddr, balance, gen.seed, gen.index)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("from gen.sendBalance: '%v'", err)
 	}
 	// wait until address will acquire isSpent status
 	spent, err := gen.isSpentAddr(addr)

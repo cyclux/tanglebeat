@@ -2,6 +2,7 @@ package confirmer
 
 import (
 	"errors"
+	"fmt"
 	. "github.com/iotaledger/iota.go/api"
 	. "github.com/iotaledger/iota.go/bundle"
 	. "github.com/iotaledger/iota.go/transaction"
@@ -14,7 +15,13 @@ import (
 
 func (conf *Confirmer) attachToTangle(trunkHash, branchHash Hash, trytes []Trytes) ([]Trytes, uint64, error) {
 	var apiret multiapi.MultiCallRet
+
+	//fmt.Printf("conf call ATT ----------------------- %v\n", conf.IotaMultiAPIaTT)
+
 	ret, err := conf.IotaMultiAPIaTT.AttachToTangle(trunkHash, branchHash, 14, trytes, &apiret)
+
+	//fmt.Printf("conf end ATT ----------------------- %v\n", conf.IotaMultiAPIaTT)
+
 	conf.AEC.CheckError(apiret.Endpoint, err)
 	return ret, uint64(apiret.Duration / time.Millisecond), err
 }
@@ -38,20 +45,20 @@ func (conf *Confirmer) promote() (error, Hash) {
 		Value:   0,
 		Tag:     conf.TxTagPromote,
 	}}
-	ts := utils.UnixSec(time.Now()) // corrected, must be seconds, not milis
+	ts := utils.UnixSec(time.Now()) // corrected, must be seconds, not millis
 	prepTransferOptions := PrepareTransfersOptions{
 		Timestamp: &ts,
 	}
 	// TODO multi api
 	bundleTrytesPrep, err := conf.IotaMultiAPI.GetAPI().PrepareTransfers(all9, transfers, prepTransferOptions)
 	if conf.AEC.CheckError(conf.IotaMultiAPI.GetAPIEndpoint(), err) {
-		return err, ""
+		return fmt.Errorf("from PrepareTransfers: '%v'", err), ""
 	}
 	var apiret multiapi.MultiCallRet
 	st := utils.UnixMs(time.Now())
 	gttaResp, err := conf.IotaMultiAPIgTTA.GetTransactionsToApprove(3, &apiret)
 	if conf.AEC.CheckError(apiret.Endpoint, err) {
-		return err, ""
+		return fmt.Errorf("from GetTransactionsToApprove: '%v'", err), ""
 	}
 	conf.totalDurationGTTAMsec += utils.UnixMs(time.Now()) - st
 
@@ -60,7 +67,7 @@ func (conf *Confirmer) promote() (error, Hash) {
 
 	btrytes, duration, err := conf.attachToTangle(trunkTxh, branchTxh, bundleTrytesPrep)
 	if err != nil {
-		return err, ""
+		return fmt.Errorf("from conf.attachToTangle: '%v'", err), ""
 	}
 	conf.totalDurationATTMsec += duration
 

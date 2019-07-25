@@ -89,7 +89,8 @@ func createConfirmer(params *senderParamsYAML, logger *logging.Logger) (*confirm
 		return nil, err
 	}
 
-	iotaMultiAPIaTT, err := multiapi.New([]string{params.IOTANodePoW}, params.TimeoutPoW)
+	var iotaMultiAPIaTT multiapi.MultiAPI
+	iotaMultiAPIaTT, err = createPoWAPI(params)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +114,8 @@ func createConfirmer(params *senderParamsYAML, logger *logging.Logger) (*confirm
 		Log:                   logger,
 		AEC:                   AEC,
 		SlowDownThreshold:     len(Config.Sender.Sequences) * 40,
+		ConfmonPollingOnly:    Config.ConfirmationMonitor.UsePollingOnly,
+		ConfmonNanozmq:        Config.ConfirmationMonitor.NanoZmq,
 	}, nil), nil
 }
 

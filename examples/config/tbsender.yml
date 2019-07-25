@@ -1,5 +1,15 @@
 # Config file for TBSender module
 
+# Confirmation monitor.
+#    preferred way is to listen to the ZMQ stream (over Nanomsg)
+#    If disabled, polling is used. This can result if significant load for respective nodes
+
+confirmationMonitor:
+    # enable listening to Nano ZMQ stream for confirmations instead of polling
+    usePollingOnly: false
+    # listen to Nanomsg stream in the format of IRI ZMQ `sn` massages (confirmations)
+    nanoZmq: tcp://tanglebeat.com:5550
+
 # sender configuration section
 sender:
   # is sender enabled.
@@ -18,11 +28,16 @@ sender:
       - http://node05.iotatoken.nl:14265
       - https://nodes.iota.cafe:443
     # IOTA nodes for getTransactionsToApprove
-    iotaNodeTipsel:
+    iotaNodeTipsel: 
       - https://nodes.thetangle.org:443
       - http://node05.iotatoken.nl:14265
-    # IOTA node for attachToTangle
+    # IOTA node for attachToTangle (if usePOWService: false)
     iotaNodePOW: https://api.powsrv.io:443
+    # alternatively using PoW service with endpoint and API key
+    usePOWService: true
+    endpointPOW: https://api.powsrv.io:443
+    apiKeyPOWService: KKKKKKKKKKKK
+
     # respective api timeouts in seconds
     apiTimeout: 15
     tipselTimeout: 20

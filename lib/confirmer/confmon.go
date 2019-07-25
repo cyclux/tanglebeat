@@ -1,11 +1,14 @@
 package confirmer
 
 import (
-	"github.com/iotaledger/iota.go/api"
 	. "github.com/iotaledger/iota.go/trinary"
 	"github.com/op/go-logging"
 	"github.com/unioproject/tanglebeat/lib/multiapi"
 	"github.com/unioproject/tanglebeat/lib/utils"
+	"nanomsg.org/go-mangos"
+	"nanomsg.org/go-mangos/protocol/sub"
+	"nanomsg.org/go-mangos/transport/tcp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,30 +17,38 @@ type bundleState struct {
 	callbacks []func(time.Time)
 }
 
-type addrState struct {
-	callbacks []func(time.Time)
-}
-
 type ConfirmationMonitor struct {
 	sync.Mutex
-	bundles   map[Hash]*bundleState
-	addresses map[Hash]*addrState
-	mapi      multiapi.MultiAPI
-	log       *logging.Logger
-	aec       utils.ErrorCounter
+	bundles       map[Hash]*bundleState
+	mapi          multiapi.MultiAPI
+	log           *logging.Logger
+	aec           utils.ErrorCounter
+	loopSleepTime time.Duration
 }
 
-func NewConfirmationMonitor(mapi multiapi.MultiAPI, log *logging.Logger, aec utils.ErrorCounter) *ConfirmationMonitor {
-	return &ConfirmationMonitor{
-		bundles:   make(map[Hash]*bundleState),
-		addresses: make(map[Hash]*addrState),
-		mapi:      mapi,
-		log:       log,
-		aec:       aec,
+const (
+	pollingSleepWithoutNanozmq = 30 * time.Second
+	pollingSleepWithNanozmq    = 3 * time.Minute
+)
+
+func NewConfirmationMonitor(mapi multiapi.MultiAPI, nanozmq string, log *logging.Logger, aec utils.ErrorCounter) *ConfirmationMonitor {
+	ret := &ConfirmationMonitor{
+		bundles:       make(map[Hash]*bundleState),
+		mapi:          mapi,
+		log:           log,
+		aec:           aec,
+		loopSleepTime: pollingSleepWithoutNanozmq,
 	}
-}
+	if nanozmq == "" {
+		log.Infof("Confirmation monitor: Will be polling only")
+		return ret
+	}
+	log.Infof("Confirmation monitor: will be listening to '%s'", nanozmq)
 
-const loopSleepConfmon = 10 * time.Second
+	go ret.nanomsgRoutine(nanozmq)
+
+	return ret
+}
 
 func (cmon *ConfirmationMonitor) errorf(format string, args ...interface{}) {
 	if cmon.log != nil {
@@ -85,7 +96,11 @@ func (cmon *ConfirmationMonitor) pollConfirmed(bundleHash Hash) {
 
 	startWaiting := time.Now()
 	for !exit {
-		time.Sleep(loopSleepConfmon)
+		cmon.Lock()
+		st := cmon.loopSleepTime
+		cmon.Unlock()
+		time.Sleep(st)
+
 		count++
 		if count%5 == 0 {
 			cmon.debugf("Confirmation polling for %v. Time since waiting: %v", bundleHash, time.Since(startWaiting))
@@ -131,62 +146,82 @@ func (cmon *ConfirmationMonitor) checkBundle(bundleHash Hash) bool {
 	return false
 }
 
-func (cmon *ConfirmationMonitor) OnBalanceZero(addr Hash, callback func(time.Time)) {
-	cmon.Lock()
-	defer cmon.Unlock()
-
-	_, ok := cmon.addresses[addr]
-	if !ok {
-		cmon.addresses[addr] = &addrState{
-			callbacks: make([]func(time.Time), 0, 2),
-		}
-		go cmon.pollZeroBalance(addr)
-	}
-	cmon.addresses[addr].callbacks = append(cmon.bundles[addr].callbacks, callback)
-}
-
-func (cmon *ConfirmationMonitor) CancelZeroBalancePolling(addr Hash) {
-	cmon.Lock()
-	defer cmon.Unlock()
-	delete(cmon.addresses, addr)
-}
-
-// TODO zero balance
-func (cmon *ConfirmationMonitor) pollZeroBalance(addr Hash) {
-	var apiret multiapi.MultiCallRet
-	var err error
-	var as *addrState
-	var ok bool
-	var bal *api.Balances
-
-	cmon.Lock()
-	mapi := cmon.mapi
-	cmon.Unlock()
-
+func (cmon *ConfirmationMonitor) nanomsgRoutine(nanozmq string) {
 	for {
+		sock := cmon.openNanozmq(nanozmq)
+
 		cmon.Lock()
-		if as, ok = cmon.addresses[addr]; !ok {
-			cmon.Unlock()
-			return // not in map, was cancelled or never started
-		}
+		cmon.loopSleepTime = pollingSleepWithNanozmq
 		cmon.Unlock()
 
-		bal, err = mapi.GetBalances(Hashes{addr}, 100, &apiret)
-		if err == nil && bal.Balances[0] == 0 {
-			nowis := time.Now()
+		cmon.log.Errorf("Confirmation monitor: started listening to '%v'", nanozmq)
 
-			// call all callbacks asynchronously
-			cmon.Lock()
-			for _, cb := range as.callbacks {
-				go cb(nowis)
+		cmon.nanozmqLoop(sock)
+		cmon.Lock()
+		cmon.loopSleepTime = pollingSleepWithoutNanozmq
+		cmon.Unlock()
+	}
+}
+
+func (cmon *ConfirmationMonitor) openNanozmq(nanozmq string) mangos.Socket {
+	var ret mangos.Socket
+	var err error
+	first := true
+	for {
+		if !first {
+			time.Sleep(30 * time.Second)
+			first = false
+		}
+		if ret, err = sub.NewSocket(); err != nil {
+			cmon.log.Errorf("Confirmation monitor: can't create new sub socket '%v'. Will be polling only", err)
+			continue
+		}
+		ret.AddTransport(tcp.NewTransport())
+		if err = ret.Dial(nanozmq); err != nil {
+			cmon.log.Errorf("Confirmation monitor: can't dial sub socket at %v: %v.  Will be polling only", nanozmq, err)
+			continue
+		}
+		err = ret.SetOption(mangos.OptionSubscribe, []byte("sn"))
+		if err != nil {
+			cmon.log.Errorf("Confirmation monitor: sub socket error %v: %v.  Will be polling only", nanozmq, err)
+			continue
+		}
+		return ret
+	}
+}
+
+func (cmon *ConfirmationMonitor) nanozmqLoop(sock mangos.Socket) {
+	var msg []byte
+	var err error
+	var msgSplit []string
+	var bundle Hash
+
+	for {
+		msg, err = sock.Recv()
+		if err != nil {
+			cmon.log.Errorf("Confirmation monitor: '%v'. Will be polling only")
+			return
+		}
+		msgSplit = strings.Split(string(msg), " ")
+		if len(msgSplit) < 7 {
+			cmon.log.Errorf("Confirmation monitor: wrong msg format")
+			continue
+		}
+		bundle = Hash(msgSplit[6])
+
+		cmon.Lock()
+		for b, bs := range cmon.bundles {
+			if b == bundle {
+				nowis := time.Now()
+				for _, cb := range bs.callbacks {
+					go cb(nowis)
+				}
+				delete(cmon.bundles, bundle)
+				StopStopwatch(bundle)
+				cmon.log.Infof("Confirmation monitor: received confirmation msg from Nanozmq for bundle %s", bundle)
+				break
 			}
-			delete(cmon.addresses, addr) // delete from map
-			cmon.Unlock()
 		}
-		if cmon.checkError(apiret.Endpoint, err) {
-			cmon.errorf("Zero balance polling for %v: '%v' from %v ", addr, err, apiret.Endpoint)
-			time.Sleep(sleepAfterError)
-		}
-		time.Sleep(loopSleepConfmon)
+		cmon.Unlock()
 	}
 }
